@@ -21,8 +21,22 @@ Keil_5/RTE/
 # Scratch
 image.png
 
-# Local-only AI tool guidance, not tracked
+# AI coding-assistant files (local only, never tracked)
 CLAUDE.md
+CLAUDE.local.md
+.claude/
+AGENTS.md
+GEMINI.md
+.gemini/
+.codex/
+.cursor/
+.cursorrules
+.cursorignore
+.windsurf/
+.windsurfrules
+.aider*
+.continue/
+.github/copilot-instructions.md
 
 # OTA tool build (tools/build_exe.bat)
 tools/.venv/
