@@ -1,8 +1,55 @@
-# BLE_HID - SNES Gamepad over HID-over-GATT (DA14585)
+# SNES_BLE_HID - SNES controller to Bluetooth adapter (DA14585)
 
-A BLE HID device for the DA145xx SDK. It exposes a standard **HID gamepad**
-(HID over GATT Profile, Device role - HOGPD) emulating an SNES pad. It pairs and
-bonds with BLE HID hosts (Windows, Android, iOS, Linux).
+Plug an original SNES controller into this adapter and it becomes a wireless **Bluetooth LE
+gamepad** - a standard HID-over-GATT device (HOGPD) that pairs with Windows, Android, iOS and
+Linux with no drivers. The controller itself is untouched.
+
+The adapter is built almost entirely from reused parts: the Bluetooth board is salvaged from an
+e-paper **electronic shelf label (ESL)** (Renesas DA14585 + SPI flash; the same board as the
+HMCLOCK project), powered by a reclaimed Li-ion cell with a TP4056-style USB charger and a
+DC-DC converter, in a 3D-printed case. Repository: https://github.com/terenceang/SNES_BLE_HID
+
+Firmware features: 12-button gamepad, battery level, deep sleep after 3 idle minutes (B wakes
+it), and **signed over-the-air updates** - plus a PC updater and a browser tester (`tools/`).
+
+## Hardware
+
+| Prototype | In the case |
+|---|---|
+| ![Prototype: ESL board wired to a SNES socket, charger module and a Super Famicom pad](images/hardware_prototype.jpg) | ![Assembled: 18650 cell, USB-C charger/DC-DC module and the SNES socket on the ESL board in a 3D-printed case](images/hardware_case.jpg) |
+
+- **Bluetooth board**: ESL board (DA14585, SPI flash, 32 kHz crystal). Its GPIOs were traced
+  one by one; only three pads are needed - see [GPIO map](#gpio-map-da14585-qfn40).
+- **SNES socket** wired to pads E09 (LATCH), E10 (DATA), E12 (CLOCK) plus supply and GND
+  (see [Running](#running) for the pinout).
+- **Power**: Li-ion cell (18650 in the case) -> USB charger module (TP4056-style, USB-C) ->
+  DC-DC converter -> the board. The firmware's battery % reads the chip's supply after the
+  converter, scaled 2.2 V = 0 % .. 2.8 V = 100 % (see [Battery level](#battery-level)).
+- **Case**: 3D printed - see [3D-printed case](#3d-printed-case).
+- **Programming**: J-Link on the test points (SWD) for the first install; after that, updates
+  go over the air - see [Programming](#programming-swd).
+
+### 3D-printed case
+
+![Case model: base with SNES socket opening and USB slot, lid embossed "SNES BTLE"](images/case.png)
+
+CAD model: [`3D/SNES BLE.step`](3D/SNES%20BLE.step) (STEP AP214, exported from Autodesk
+Fusion; opens in any CAD tool - export the bodies to STL/3MF for your slicer).
+
+- Two parts: a **base** that holds the ESL board, the charger/DC-DC module and the cell (see
+  the photo above), and a **lid** with "SNES BTLE" embossed on top.
+- Front opening for the **SNES controller socket**; side slot for the **USB-C** charging port.
+- Check the cell and socket fit against your own parts before printing - 18650 cells and SNES
+  sockets vary slightly.
+
+### Programming (SWD)
+
+![Pogo-pin jig on the board's SWD test points, J-Link wires attached](images/programming.png)
+
+The first firmware goes in over SWD: a pogo-pin jig on the test points (TP5 SWCLK, TP6 SWDIO,
+plus power/GND - see [Test points](#test-points-tp)) and a J-Link, then `bash Keil_5/flash.sh`
+(see [Build and flash](#build-and-flash)). The image installs itself into SPI flash; after
+that, updates go over the air ([OTA](#updating-over-the-air-ota)).
 
 ## Overview
 
@@ -14,10 +61,10 @@ bonds with BLE HID hosts (Windows, Android, iOS, Linux).
     for Boot protocol is refused, since HOGPD would then reject every input report)
 - **Device Information Service** (0x180A, SDK `diss` + `app_diss`): manufacturer
   `motionfxdesign`, model `BT-SNES`, firmware revision = `APP_VERSION`, PnP ID (VID 0xFFFF /
-  PID 0x0001 - unassigned placeholder, version = `APP_VERSION_BCD`). Windows shows the version
-  in Device Manager > the pad's HID device > Details > Hardware Ids as `REV&0030` (v0.3.0);
-  BLE tools (nRF Connect) show the Firmware Revision string. Hosts cache this at pairing, so
-  re-pair to see a new version.
+  PID 0x0001 - unassigned placeholder, version = `APP_VERSION_BCD`, e.g. `REV&0055` for 0.5.5
+  in Device Manager > the pad's HID device > Details > Hardware Ids). BLE tools (nRF Connect)
+  show the Firmware Revision string. Windows caches the PnP ID at pairing, so its REV stays at
+  the paired version after an update - the web tester's helper reads the live version instead.
 - **Buttons** (`SNES_BUTTON_*` in `src/user_hid_hogpd.h`), bit 0 to 11:
   A, B, Select, Start, D-pad Up, Down, Left, Right, X, Y, L, R
 - **GAP**: peripheral, general discoverable; advertising data carries the HID
@@ -48,26 +95,33 @@ application supplies the glue in `src/user_hid_hogpd.c`:
 ## Project layout
 
 ```
-BLE_HID/
-├── Keil_5/BLE_HID.uvprojx      1 target: DA14585
-└── src/
-    ├── user_hid.c/.h           GAP peripheral flow + message dispatch
-    ├── user_hid_hogpd.c/.h     HOGPD glue, Report Map, SNES pad polling, CCC persistence
-    ├── selflash.c/.h           installs a J-Link-loaded image into SPI flash (boot persistence)
-    ├── config/                 user configuration headers (app_version.h = firmware version)
-    └── platform/               pad/peripheral initialization
+Keil_5/
+├── BLE_HID.uvprojx             Keil project, 1 target: DA14585
+└── flash.sh                    J-Link RAM load (+ marker so the image installs itself)
+src/
+├── user_hid.c/.h               GAP flow, idle/deep sleep, OTA mode, message dispatch
+├── user_hid_hogpd.c/.h         HOGPD glue, Report Map, SNES pad driver, battery, CCC persistence
+├── ota_verify.c/.h             OTA image signature check (SHA-256 + ROM ECDSA P-256)
+├── selflash.c/.h               installs a J-Link-loaded image into SPI flash
+├── config/                     SDK config headers; app_version.h = the firmware version,
+│                               ota_pubkey.h = OTA signing public key
+└── platform/                   pad/peripheral initialization
 tools/
-├── suota.py                    PC over-the-air updater (window or command line)
+├── suota.py                    OTA updater (window/CLI), --sign/--keygen, --serve helper
+├── suota_protocol.json         protocol constants shared by suota.py and web/
 ├── build_exe.bat               builds tools/dist/suota.exe (standalone)
-└── web/                        browser tester: controller test, version info, OTA (React)
+└── web/                        browser tester: controller test, version, battery, OTA (React)
+3D/                             SNES BLE.step - 3D-printed case (STEP)
+docs/                           Programming.md (build/flash/flash map), pinout sheets
+images/                         photos and diagrams used here
 ```
 
 ## Build and flash
 
 See `docs/Programming.md` for the full procedure. Short version:
 
-Open `Keil_5/BLE_HID.uvprojx`, select a target and build, or from the command
-line:
+Build in Keil (`Keil_5/BLE_HID.uvprojx`) or from the command line (the project must sit in the
+SDK tree at `projects/target_apps/ble_examples/BLE_HID` - it includes the SDK by relative path):
 
 ```
 UV4 -b Keil_5/BLE_HID.uvprojx -t DA14585 -j0 -o build_log.txt
@@ -133,11 +187,14 @@ from Windows through the helper; pressed buttons sink and get a ring on the draw
 
 - **Controller**: SNES layout that lights up as you press buttons (browser Gamepad API - the
   pad must be connected to Windows; press a button once so the browser reports it).
-- **Device**: firmware version and battery. With the helper running they fill in by themselves
-  for the pad paired with Windows (read from Windows' device properties - the same `REV&0051`
-  and battery % Windows shows); without it, a Web Bluetooth button reads them directly.
+- **Device**: firmware version, battery and **OTA mode**. With the helper running they fill in
+  by themselves for the pad paired with Windows: battery from Windows' device properties, and -
+  once per connection, over the Windows link - the live Firmware Revision and whether the pad is
+  in OTA mode (its update service only answers in OTA mode). Without the helper, a Web Bluetooth
+  button reads version and battery directly.
 - **Firmware update (OTA)**: same protocol and signed-image check as `tools/suota.py`; through
   the helper it uses the Windows connection, so the pad doesn't need to be removed first.
+  **Install** stays disabled, with the reason, until the pad is connected and in OTA mode.
 
 ```
 python tools/suota.py --serve   # helper on 127.0.0.1:8765 (or: suota.exe --serve)
@@ -171,12 +228,11 @@ PC tool in `tools/`. A J-Link is only needed once, to install v0.5.0 or later. O
    Only then is the update service unlocked (otherwise it refuses every request), and the idle
    timeouts stretch to 10 minutes (enough for an update); after that it deep-sleeps, which also
    ends OTA mode.
-2. Run `tools\dist\suota.exe` (or `python tools/suota.py`), pick the `_signed.bin`,
-   pick the pad, press **Update**. The tool refuses unsigned files, pairs if needed (the
-   service requires an encrypted link), sends the image; the pad checks the CRC, then the
-   signature (about 2 s), and reboots into it. Command line:
-   `python tools/suota.py FILE_signed.bin [-d ADDRESS]`.
-3. Power-cycle normally afterwards to leave OTA mode.
+2. Send it: the web tester (Firmware update -> Install update), or `tools\dist\suota.exe` /
+   `python tools/suota.py` (pick the `_signed.bin` and the pad, press **Update**), or on the
+   command line `python tools/suota.py FILE_signed.bin [-d ADDRESS]`. The tools refuse unsigned
+   files and pair if needed (the service requires an encrypted link). The pad checks the CRC,
+   then the signature (about 2 s), and reboots into the new firmware - in normal mode.
 
 **Signing.** A signed file is the firmware + `BTSNSIG1` + an ECDSA P-256 signature of its
 SHA-256. After the transfer the pad hashes the image in flash and verifies the signature
@@ -193,7 +249,8 @@ How it's safe: the image goes into the **other** flash slot (from the product he
 `0x38000`; this unit: `0x04000` and `0x1F000`), is marked valid only after its CRC checks
 out, and the boot ROM boots the newest valid slot - an interrupted update leaves the old
 firmware booting. Both slots stay clear of the bond/CCC sectors (`0x1D000-0x1EFFF`) for any
-image that fits in RAM. Updating to the exact image already installed is refused.
+image that fits in RAM. (SUOTA refuses an image whose version *and* timestamp match a slot;
+the tools stamp every send, so re-sending the same build is accepted.)
 
 Notes:
 - After first installing v0.4.0, **remove and re-pair the pad** in Windows: it added
@@ -209,7 +266,8 @@ Notes:
 ## GPIO map (DA14585, QFN40)
 
 The chip has 23 GPIOs (source: the HMCLOCK PCB pinout in `../HMCLOCK/Hardware/pinout_0.pdf`, same PCB).
-P1_4, P1_5 and P3_1 to P3_7 do not exist on this package, so their registers read/toggle with nothing behind them.
+P1_4 and P1_5 are the SWD pins (SWCLK/SWDIO, test points TP5/TP6) - leave them to the debugger;
+P3_1 to P3_7 do not exist on this package.
 
 ### Usable pins (reachable on the PCB, traced)
 
@@ -286,10 +344,10 @@ Trace one pin at a time to confirm - with several pulsing, idle pads pick up nei
 | E06 | TSCL | ? |  |  | not traced |
 | E07 | TSDA | ? |  |  | not traced |
 | E08 | BS | ? |  |  | not traced |
-| E09 | nBUSY | P2_0 | e-paper SDI | **SNES LATCH** | traced | Blue
-| E10 | nRST | P0_7 | e-paper D/C | **SNES DATA** | traced | Green
+| E09 | nBUSY | P2_0 | e-paper SDI | **SNES LATCH** (blue wire) | traced |
+| E10 | nRST | P0_7 | e-paper D/C | **SNES DATA** (green wire) | traced |
 | E11 | D/C | ? |  |  | not P0_1 (traced) |
-| E12 | nCS | P2_1 | e-paper nCS | **SNES CLOCK** | traced | Yellow
+| E12 | nCS | P2_1 | e-paper nCS | **SNES CLOCK** (yellow wire) | traced |
 | E13 | SCLK | ? |  |  | 314 Hz seen in a 7-pin P0 test - likely crosstalk |
 | E14 | SDI | ? |  |  | not traced |
 | E15 | VDDIO | ? |  |  | not traced |
@@ -325,8 +383,9 @@ also pushed on every connection (`user_batt_enable()`) and when the host enables
 (`user_batt_ntf_cfg_ind_handler()`): the SDK Battery Service only stores a level when it is
 sent a `BASS_BATT_LEVEL_UPD_REQ`, so without the push a host read returns 0% until the level
 changes. The battery CCC is saved to flash with the HID one and restored on reconnect, since
-bonded hosts don't rewrite it. It measures the chip's supply, not the LiPo: behind a
-regulated 3.3 V rail it reads about 100% until the rail collapses. `user_batt_mv` holds the
+bonded hosts don't rewrite it. It measures the chip's supply after the DC-DC converter, not the cell:
+it only tracks the battery if the converter's output sags with the cell; a converter that holds
+its output steady reads 100% until it drops out. `user_batt_mv` holds the
 last reading in mV (read it with a debugger, e.g. 3332 mV on the bench). For a true LiPo
 percentage, wire a divider from LiPo+ to an ADC pin (P0_0-P0_3) and read that - but P0_1/P0_2 are not routed on
 this PCB (traced) and P0_0/P0_3 are the SPI flash, so it needs a bodge wire to the chip.
@@ -386,6 +445,10 @@ re-enable it and reflash before using any of this table.
 | `encrypt_req_ind` then disconnect (no `encrypt_ind`) after every reboot, even right after pairing | Bond DB not loaded from flash: missing `app_easy_security_bdb_init()` in `user_app_init()`. |
 | `reason=08` shortly after notifications enabled | Link supervision timeout; seen once, cause unconfirmed (suspect SPI-flash erase in `ccc_flash_save()` / bond write blocking the radio). Re-check on a fresh pair. |
 | Good log: `encrypt_req_ind`, `encrypt_ind auth=01`, `GATTC_MTU_CHANGED_IND` | Bonded reconnect works. |
+| Web tester: Install disabled, "isn't in OTA mode" | Hold L + R + Start + Select for 3 s (it reboots and reconnects; the page re-checks). On firmware older than 0.5.4: let it sleep, then hold Start + Select and tap B. |
+| OTA: "Device ... was not found" | Old helper/tool that scanned for the pad; a pad connected to Windows doesn't advertise. Current `suota.py` opens it through Windows' paired-device lookup - update the tool. |
+| Windows / Device Manager still shows the old version after an update | Windows keeps the PnP ID from pairing. The web tester (helper) shows the live version; re-pair to refresh Windows. |
+| `flash.sh` load doesn't survive a power cycle | Check `flash.sh` printed `w4 <addr>, 0x5E1FF1A5` (the install marker) - it needs the `.map` from the same build. Firmware older than 0.5.2 also mis-ordered image ids next to an OTA image (fixed in `selflash.c`). |
 | Host shows 0% battery, mainly after a reconnect | Fixed in v0.2.0: the level is pushed to the Battery Service on every connection and the battery CCC is restored for bonded hosts. If it persists, check the UART `battery: X mV, Y%` line to confirm the ADC reading itself is sane. |
 
 After re-flashing with a bond-layout change, remove the bond on the host and re-pair.

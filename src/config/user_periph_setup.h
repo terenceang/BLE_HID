@@ -31,7 +31,7 @@
 
 /****************************************************************************************/
 /* GPIO map, DA14585 QFN40 (23 GPIOs; source of truth is the defines below)              */
-/* Same PCB as HMCLOCK; P1_4, P1_5, P3_1..P3_7 do not exist on this package.             */
+/* Same PCB as HMCLOCK; P1_4/P1_5 = SWCLK/SWDIO (keep for SWD), P3_1..P3_7 don't exist.  */
 /*   P0_0  USED  SPI flash CLK                                                          */
 /*   P0_1  NC    not found (traced)                                                     */
 /*   P0_2  NC    not found (traced)                                                     */
