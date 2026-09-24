@@ -15,51 +15,41 @@ The private key (tools/keys/ota_private.pem) is not in git - back it up: without
 no new firmware can be sent over the air (only via J-Link).
 
 The 64-byte SUOTA image header is built here, the same way src/selflash.c builds it.
-The pad only accepts an update in OTA mode: power it on with Start + Select held.
+The pad only accepts an update in OTA mode: hold L + R + Start + Select for 3 s while it runs,
+or Start + Select at boot (power-on, or tap B to wake it from sleep).
 Needs Windows 10 1709+ (or any bleak-supported OS) and `pip install bleak`
 (signing/keygen also `pip install cryptography`).
 """
 
-import os
-
 import argparse
 import asyncio
+import json
+import os
 import struct
 import sys
 import threading
 import time
 import zlib
 
-# Characteristic UUIDs from sdk/ble_stack/profiles/suota/suotar/src/suotar.c
-MEM_DEV      = "8082caa8-41a6-4021-91c6-56f9b954cc34"
-GPIO_MAP     = "724249f0-5ec3-4b5f-8804-42345af08651"
-PATCH_LEN    = "9d84b9a3-000c-49d8-9183-855b673fda31"
-PATCH_DATA   = "457871e8-d516-4ca1-9116-57d0b17b9cb2"
-STATUS       = "5f78df94-798c-46f5-990a-b3eb6a065c88"
-PD_CHAR_SIZE = "42c3dfdd-77be-4d9c-8454-8f875267fb3b"
+# Protocol constants: single source shared with tools/web (see its "_note" for the firmware side).
+# In suota.exe the file is bundled next to the code (build_exe.bat --add-data).
+_P = json.load(open(os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))),
+                                 "suota_protocol.json"), encoding="utf-8"))
+SUOTA_SERVICE = _P["service"]
+SUOTA_VERSION = _P["chars"]["version"]     # read-only; readable only while the pad is in OTA mode
+MEM_DEV, GPIO_MAP, PATCH_LEN, PATCH_DATA, STATUS, PD_CHAR_SIZE = (
+    _P["chars"][k] for k in ("mem_dev", "gpio_map", "patch_len", "patch_data", "status", "pd_char_size"))
+IMG_SPI_FLASH, IMG_END, REBOOT = (int(_P["commands"][k], 16) for k in ("img_spi_flash", "img_end", "reboot"))
+SPI_GPIO_MAP = int(_P["spi_gpio_map"], 16)
+MAX_BLOCK = _P["max_block"]
+ST_IMG_STARTED, ST_CMP_OK = _P["status_img_started"], _P["status_ok"]
+STATUS_TEXT = {int(k): v for k, v in _P["status_text"].items()}
+VERSION_TAG = _P["version_tag"].encode()
 
-IMG_SPI_FLASH = 0x13000000      # SUOTAR_IMG_SPI_FLASH, bank 0 = let the pad pick the older slot
-IMG_END       = 0xFE000000
-REBOOT        = 0xFD000000
-# SPI flash pins (port << 4 | pin): MISO P0_5, MOSI P0_6, CS P0_3, CLK P0_0 (user_periph_setup.h)
-SPI_GPIO_MAP  = 0x05 << 24 | 0x06 << 16 | 0x03 << 8 | 0x00
-MAX_BLOCK     = 0x200           # SUOTA_OVERALL_PD_SIZE
-
-ST_IMG_STARTED, ST_CMP_OK = 0x10, 0x02
-STATUS_TEXT = {
-    0x03: "service exit", 0x04: "CRC error", 0x05: "block length error",
-    0x06: "flash write error", 0x07: "block too large", 0x08: "invalid memory type",
-    0x09: "SIGNATURE CHECK FAILED - image not signed with this pad's key (rejected, old firmware kept)",
-    0x11: "invalid image bank", 0x12: "invalid image header",
-    0x13: "image too large", 0x14: "invalid product header (flash not set up for OTA)",
-    0x15: "this exact image is already installed", 0x16: "flash read error",
-}
-VERSION_TAG = b"BLE_HID_VERSION="
-
-# Signed firmware = firmware + SIG_MAGIC + 64-byte signature (r || s, big-endian) of SHA-256(firmware).
-# Must match src/ota_verify.c.
-SIG_MAGIC = b"BTSNSIG1"
+# Signed firmware = firmware + SIG_MAGIC + 64-byte signature (r || s, big-endian) of SHA-256(firmware)
+SIG_MAGIC = _P["sig_magic"].encode()
 SIG_TRAILER = len(SIG_MAGIC) + 64
+SERVE_PORT = _P["helper_port"]
 HERE = os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, "frozen", False) else __file__))
 KEY_FILE = os.path.join(HERE, "keys", "ota_private.pem")
 PUBKEY_HEADER = os.path.join(HERE, "..", "src", "config", "ota_pubkey.h")
@@ -164,7 +154,7 @@ async def update(address: str, payload: bytes, log, progress):
         from bleak.backends.device import BLEDevice
         target = BLEDevice(address, None, None)
     async with BleakClient(target, timeout=20, winrt={"use_cached_services": False}) as c:
-        if c.services.get_service("0000fef5-0000-1000-8000-00805f9b34fb") is None:
+        if c.services.get_service(SUOTA_SERVICE) is None:
             raise RuntimeError("no OTA service - flash v0.4.0+ over J-Link first, "
                                "then remove and re-pair the pad in Windows")
         try:
@@ -321,7 +311,6 @@ def cli(args):
 
 # ---- helper for the web tester (tools/web): python suota.py --serve ------------------------------
 
-SERVE_PORT = 8765
 # Paired BT-SNES pads as Windows sees them: connection state, battery (read by Windows from the
 # Battery Service) and firmware version (the REV in the HID hardware ID = Device Information PnP ID).
 PADS_PS = r"""
@@ -365,13 +354,19 @@ def serve(port=SERVE_PORT):
     from urllib.parse import parse_qs, urlparse
 
     ota = {"busy": False, "progress": 0.0, "log": [], "error": None, "done": False}
+    ota_lock = threading.Lock()
+    MAX_IMAGE = 0x18000                     # an image must fit the DA14585's 96 KB RAM
     cache = {"t": 0.0, "pads": []}
     lock = threading.Lock()
     local = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
 
     # Windows' REV is fixed at pairing and goes stale after a firmware update, so read the live
     # Firmware Revision (Device Information 0x2A26) once per connection, over the Windows link
+    # OTA mode is probed the same way: outside it the firmware locks the SUOTA service
+    # (SRV_PERM_DISABLE), so reading its version characteristic fails; in OTA mode it succeeds.
+    # A mode change always means a reboot, i.e. a reconnect, so once per connection is enough.
     live = {}           # address -> version read from the pad while it's connected
+    ota_ready = {}      # address -> True (OTA mode) / False (normal), same lifetime as live
     reading = set()
 
     def read_live_version(address):
@@ -380,9 +375,15 @@ def serve(port=SERVE_PORT):
             from bleak.backends.device import BLEDevice
             async with BleakClient(BLEDevice(address, None, None) if sys.platform == "win32" else address,
                                    timeout=20) as c:
-                return (await c.read_gatt_char("00002a26-0000-1000-8000-00805f9b34fb")).decode()
+                version = (await c.read_gatt_char("00002a26-0000-1000-8000-00805f9b34fb")).decode()
+                try:
+                    await c.read_gatt_char(SUOTA_VERSION)
+                    ota = True
+                except Exception:
+                    ota = False
+                return version, ota
         try:
-            live[address] = asyncio.run(rd())
+            live[address], ota_ready[address] = asyncio.run(rd())
         except Exception:
             pass        # busy/asleep: keep showing Windows' value, retry on a later poll
         finally:
@@ -396,6 +397,7 @@ def serve(port=SERVE_PORT):
                     a = p["address"]
                     if not p["connected"]:
                         live.pop(a, None)                   # re-read after the next connection
+                        ota_ready.pop(a, None)
                     elif a not in live and a not in reading and not ota["busy"]:
                         reading.add(a)
                         threading.Thread(target=read_live_version, args=(a,), daemon=True).start()
@@ -404,6 +406,7 @@ def serve(port=SERVE_PORT):
                 q = dict(p)
                 q["version_live"] = q["address"] in live    # False: Windows' cached value (from pairing)
                 q["version"] = live.get(q["address"], q["version"])
+                q["ota_mode"] = ota_ready.get(q["address"])  # None: not probed yet
                 out.append(q)
             return out
 
@@ -460,14 +463,18 @@ def serve(port=SERVE_PORT):
             if url.path != "/api/update":
                 return self.reply(404, {"error": "not found"})
             address = parse_qs(url.query).get("address", [""])[0]
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            size = int(self.headers.get("Content-Length", 0))
+            if not 0 < size <= MAX_IMAGE:
+                return self.reply(413, {"error": "firmware file size out of range"})
+            body = self.rfile.read(size)
             if not address:
                 return self.reply(400, {"error": "address missing"})
             if not is_signed(body):
                 return self.reply(400, {"error": "file is not signed - run: python tools/suota.py --sign FILE.bin"})
-            if ota["busy"]:
-                return self.reply(409, {"error": "an update is already running"})
-            ota.update(busy=True, progress=0.0, log=[], error=None, done=False)
+            with ota_lock:                          # two tabs pressing Update at once
+                if ota["busy"]:
+                    return self.reply(409, {"error": "an update is already running"})
+                ota.update(busy=True, progress=0.0, log=[], error=None, done=False)
             threading.Thread(target=run_ota, args=(address, body), daemon=True).start()
             self.reply(202, ota)
 

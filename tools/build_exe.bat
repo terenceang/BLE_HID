@@ -9,6 +9,7 @@ if not exist .venv\Scripts\python.exe (
 .venv\Scripts\python suota.py --selftest || exit /b 1
 .venv\Scripts\python -m PyInstaller --noconfirm --onefile --windowed --name suota ^
     --distpath dist --workpath build --specpath build ^
+    --add-data "%~dp0suota_protocol.json;." ^
     --collect-submodules winrt --collect-submodules bleak suota.py || exit /b 1
 echo.
 echo Built %~dp0dist\suota.exe

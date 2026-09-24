@@ -82,6 +82,10 @@ static void param_update_request_timer_cb(void)
 /// Connected with no button change this long -> disconnect and deep sleep
 #define CONN_IDLE_TIMEOUT               MS_TO_TIMERUNITS(180000)    // 3 minutes
 
+/// Both idle timeouts in OTA mode: long enough for an update (1-2 min), but a pad left in OTA mode
+/// still ends up in deep sleep (which also leaves OTA mode) instead of draining its battery
+#define OTA_IDLE_TIMEOUT                MS_TO_TIMERUNITS(600000)    // 10 minutes
+
 static timer_hnd idle_timer __SECTION_ZERO("retention_mem_area0");
 /// Powered on with Start + Select held: OTA service unlocked, idle timeouts off
 static bool ota_mode __SECTION_ZERO("retention_mem_area0");
@@ -115,7 +119,7 @@ void user_hid_activity(void)
 {
     if (idle_timer != EASY_TIMER_INVALID_TIMER)
     {
-        idle_timer = app_easy_timer_modify(idle_timer, CONN_IDLE_TIMEOUT);
+        idle_timer = app_easy_timer_modify(idle_timer, ota_mode ? OTA_IDLE_TIMEOUT : CONN_IDLE_TIMEOUT);
     }
 }
 
@@ -194,6 +198,7 @@ void user_ota_status_change(const uint8_t suotar_event)
 
     if (suotar_event == SUOTAR_START)
     {
+        user_hid_activity();        // the transfer counts as activity: full idle timeout ahead of it
         user_hid_poll_stop();
     }
     else
@@ -266,16 +271,8 @@ void user_app_adv_start(void)
     struct gapm_start_advertise_cmd *cmd = app_easy_gap_undirected_advertise_get_active();
     user_app_adv_set_name(cmd);
 
-    // Stops after ADV_IDLE_TIMEOUT -> user_app_adv_undirect_complete(GAP_ERR_CANCELED) -> deep sleep
-    // (not in OTA mode: it advertises until updated or power-cycled)
-    if (ota_mode)
-    {
-        app_easy_gap_undirected_advertise_start();
-    }
-    else
-    {
-        app_easy_gap_undirected_advertise_with_timeout_start(ADV_IDLE_TIMEOUT, NULL);
-    }
+    // Stops after the idle timeout -> user_app_adv_undirect_complete(GAP_ERR_CANCELED) -> deep sleep
+    app_easy_gap_undirected_advertise_with_timeout_start(ota_mode ? OTA_IDLE_TIMEOUT : ADV_IDLE_TIMEOUT, NULL);
 
     printk("\nuser_app_adv_start! BT-SNES-%02X%02X%02X\n",
           dev_bdaddr.addr[2], dev_bdaddr.addr[1], dev_bdaddr.addr[0]);
@@ -297,10 +294,7 @@ void user_app_connection(uint8_t connection_idx, struct gapc_connection_req_ind 
     {
         app_connection_idx = connection_idx;
         app_easy_gap_advertise_with_timeout_stop();
-        if (!ota_mode)
-        {
-            idle_timer = app_easy_timer(CONN_IDLE_TIMEOUT, idle_timer_cb);
-        }
+        idle_timer = app_easy_timer(ota_mode ? OTA_IDLE_TIMEOUT : CONN_IDLE_TIMEOUT, idle_timer_cb);
 
         // Check whether the connection parameters are the preferred ones.
         // If not, schedule a connection parameter update request.

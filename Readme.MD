@@ -169,7 +169,8 @@ PC tool in `tools/`. A J-Link is only needed once, to install v0.5.0 or later. O
    - power it on while holding **Start + Select**.
 
    Only then is the update service unlocked (otherwise it refuses every request), and the idle
-   timeouts are off, so it advertises/stays connected until updated or power-cycled.
+   timeouts stretch to 10 minutes (enough for an update); after that it deep-sleeps, which also
+   ends OTA mode.
 2. Run `tools\dist\suota.exe` (or `python tools/suota.py`), pick the `_signed.bin`,
    pick the pad, press **Update**. The tool refuses unsigned files, pairs if needed (the
    service requires an encrypted link), sends the image; the pad checks the CRC, then the
@@ -360,12 +361,12 @@ Windows/Android host reconnects without re-pairing:
   with an OR of `SNES_BUTTON_*`, or `app_hogpd_send_input_report(conidx, report, length)`
   for raw reports. Reports are only delivered while the host keeps notifications
   enabled. The pad driver is `snes_read()` / `poll_timer_cb()` in `src/user_hid_hogpd.c`.
-- **Change HID topology** (add reports, axes, other collections): edit the
-  Report Map (`hid_report_map`, `HID_REPORT_LEN`; the map's length is derived from
-  `sizeof(hid_report_map)`, not a separate constant), `SNES_BUTTON_COUNT` if the
-  button count changes (`user_hid_hogpd.h` - drives the report-map bytes and
-  `snes_map[]`, but not `HID_REPORT_LEN`/the padding mask, which are a real
-  bit-packing derivation and need updating by hand), the `APP_HOGPD_*` defines in
+- **Change the button count**: `SNES_BUTTON_COUNT` (`user_hid_hogpd.h`) is the single source -
+  the Report Map's count and padding, `HID_REPORT_LEN` and the report mask follow from it; add
+  the new entries to `snes_map[]` (a compile-time check enforces the count; 1-16 buttons, not a
+  multiple of 8).
+- **Change HID topology** (add reports, axes, other collections): edit the Report Map
+  (`hid_report_map`; its length is `sizeof(hid_report_map)`), the `APP_HOGPD_*` defines in
   `src/config/user_profiles_config.h`, and the appearance in `src/config/user_config.h`;
   keep report IDs in sync. Hosts cache the Report Map, so delete the old bond on the
   host after changing it.

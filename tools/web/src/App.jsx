@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { SUOTA_SERVICE, isSigned, otaUpdate, versionOf } from "./suota.js";
+import { HELPER_PORT, SUOTA_SERVICE, isSigned, otaUpdate, versionOf } from "./suota.js";
 import SnesPad from "./SnesPad.jsx";
 
 // HID button n = report bit n (SNES_BUTTON_* in src/user_hid_hogpd.h)
@@ -24,7 +24,7 @@ function useGamepad() {
 }
 
 // Local helper (python tools/suota.py --serve): pad info from Windows + OTA over the Windows link
-const HELPER = "http://127.0.0.1:8765";
+const HELPER = `http://127.0.0.1:${HELPER_PORT}`;
 
 function useHelper() {
   const [h, setH] = useState({ up: false, pads: [] });
@@ -102,6 +102,11 @@ function HelperPads({ pads }) {
       <dt>Firmware</dt><dd><b>{p.version ?? "—"}</b>{p.version && !p.version_live &&
         <span className="muted"> (as of pairing - Windows doesn't refresh it; the live value appears once the pad is connected)</span>}</dd>
       <dt>Battery</dt><dd>{p.battery == null ? "—" : `${p.battery} %`}</dd>
+      {p.connected && (
+        <><dt>OTA mode</dt><dd>{p.ota_mode == null ? <span className="muted">checking…</span>
+          : p.ota_mode ? <span className="ok">Ready for an update</span>
+          : <span className="muted">Off - hold L + R + Start + Select for 3 s to enter it</span>}</dd></>
+      )}
     </dl>
   ));
 }
@@ -239,6 +244,8 @@ function Firmware({ server, helper, hpad }) {
 
   const via = helper.up && hpad ? "helper" : server ? "webbt" : null;
   const blocker = !via ? (helper.up ? "Pair a BT-SNES pad with this PC first." : "Run the helper, or read the device info first (it connects the pad).")
+    : via === "helper" && !hpad.connected ? "The pad isn't connected - press B to wake it."
+    : via === "helper" && hpad.ota_mode === false ? "The pad isn't in OTA mode - hold L + R + Start + Select for 3 s."
     : !file ? "Choose a signed firmware file."
     : !file.signed ? "This file isn't signed, so the pad would refuse it." : null;
 
@@ -246,7 +253,7 @@ function Firmware({ server, helper, hpad }) {
     <details className="advanced">
       <summary><h2>Firmware update</h2><span className="muted">advanced</span></summary>
       <p className="muted">
-        Power the pad on holding <b>Start + Select</b>{helper.up ? "" : ", read the device info above"}, then send a file made with{" "}
+        Put the pad in OTA mode - hold <b>L + R + Start + Select</b> for 3 s (it reboots){helper.up ? "" : ", then read the device info above"} - and send a file made with{" "}
         <code>python tools/suota.py --sign BLE_HID_585.bin</code>.
       </p>
       <div className="row">

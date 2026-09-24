@@ -1,28 +1,21 @@
-// SUOTA over Web Bluetooth - same protocol and image format as tools/suota.py (keep in sync).
+// SUOTA over Web Bluetooth - same protocol and image format as tools/suota.py.
+// Constants come from tools/suota_protocol.json, shared with suota.py (single source).
+import P from "../../suota_protocol.json" with { type: "json" };
 
-export const SUOTA_SERVICE = "0000fef5-0000-1000-8000-00805f9b34fb";
-const MEM_DEV = "8082caa8-41a6-4021-91c6-56f9b954cc34";
-const GPIO_MAP = "724249f0-5ec3-4b5f-8804-42345af08651";
-const PATCH_LEN = "9d84b9a3-000c-49d8-9183-855b673fda31";
-const PATCH_DATA = "457871e8-d516-4ca1-9116-57d0b17b9cb2";
-const STATUS = "5f78df94-798c-46f5-990a-b3eb6a065c88";
-
-const IMG_SPI_FLASH = 0x13000000, IMG_END = 0xfe000000, REBOOT = 0xfd000000;
-const SPI_GPIO_MAP = (0x05 << 24) | (0x06 << 16) | (0x03 << 8) | 0x00; // MISO P0_5, MOSI P0_6, CS P0_3, CLK P0_0
+export const SUOTA_SERVICE = P.service;
+export const HELPER_PORT = P.helper_port;
+const { mem_dev: MEM_DEV, gpio_map: GPIO_MAP, patch_len: PATCH_LEN, patch_data: PATCH_DATA, status: STATUS } = P.chars;
+const [IMG_SPI_FLASH, IMG_END, REBOOT] = ["img_spi_flash", "img_end", "reboot"].map((k) => parseInt(P.commands[k], 16));
+const SPI_GPIO_MAP = parseInt(P.spi_gpio_map, 16);
 const CHUNK = 20;                   // Web Bluetooth doesn't expose the MTU; 20 always fits
-const BLOCK = Math.floor(0x200 / CHUNK) * CHUNK;   // SUOTA_OVERALL_PD_SIZE
-const ST_CMP_OK = 0x02, ST_IMG_STARTED = 0x10;
-const STATUS_TEXT = {
-  0x03: "service exit", 0x04: "CRC error", 0x05: "block length error", 0x06: "flash write error",
-  0x07: "block too large", 0x08: "invalid memory type",
-  0x09: "SIGNATURE CHECK FAILED - not signed with this pad's key (old firmware kept)",
-  0x11: "invalid image bank", 0x12: "invalid image header", 0x13: "image too large",
-  0x14: "invalid product header", 0x15: "this exact image is already installed", 0x16: "flash read error",
-};
+const BLOCK = Math.floor(P.max_block / CHUNK) * CHUNK;
+const ST_CMP_OK = P.status_ok, ST_IMG_STARTED = P.status_img_started;
+const STATUS_TEXT = P.status_text;  // keys are decimal status codes
 
 const enc = new TextEncoder();
-const VERSION_TAG = enc.encode("BLE_HID_VERSION=");
-const SIG_MAGIC = enc.encode("BTSNSIG1");
+const VERSION_TAG = enc.encode(P.version_tag);
+const SIG_MAGIC = enc.encode(P.sig_magic);
+const SIG_TRAILER = SIG_MAGIC.length + 64;    // magic + ECDSA r || s
 
 function indexOf(hay, needle, from = 0) {
   outer: for (let i = from; i <= hay.length - needle.length; i++) {
@@ -52,7 +45,7 @@ export function versionOf(body) {
 }
 
 export function isSigned(body) {
-  return body.length > 72 && indexOf(body.subarray(body.length - 72, body.length - 64), SIG_MAGIC) === 0;
+  return body.length > SIG_TRAILER && indexOf(body.subarray(body.length - SIG_TRAILER, body.length - 64), SIG_MAGIC) === 0;
 }
 
 /** SUOTA payload: 64-byte header + body + XOR byte (the pad checks crc_calc == 0). */
@@ -107,7 +100,7 @@ export async function otaUpdate(server, body, log, progress) {
     await ch.STATUS.startNotifications();
     await ch.MEM_DEV.writeValueWithResponse(u32(IMG_SPI_FLASH));
   } catch (e) {
-    throw new Error(`pad refused the update (${e.message}). Is it in OTA mode (power on holding Start + Select) and paired with this PC?`);
+    throw new Error(`pad refused the update (${e.message}). Is it in OTA mode (hold L + R + Start + Select for 3 s) and paired with this PC?`);
   }
   await expect(ST_IMG_STARTED, "start");
   await ch.GPIO_MAP.writeValueWithResponse(u32(SPI_GPIO_MAP));

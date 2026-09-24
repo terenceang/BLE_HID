@@ -46,8 +46,13 @@
 /// HID Report Map: SNES gamepad report descriptor (Report ID 1)
 extern const uint8_t hid_report_map[];
 
-/// Number of SNES buttons (report count in hid_report_map, snes_map[] size in user_hid_hogpd.c)
+/// Number of SNES buttons: the single source for the Report Map (button count + padding), the
+/// input report length and pack_report()'s mask. snes_map[] (user_hid_hogpd.c) lists them in
+/// shift-register order, so it must have this many entries.
 #define SNES_BUTTON_COUNT               (12)
+
+/// Input report length: the button bitmap rounded up to whole bytes (uint16_t bitmap: max 16 buttons)
+#define HID_REPORT_LEN                  ((SNES_BUTTON_COUNT + 7) / 8)
 
 /// SNES button bit positions
 #define SNES_BUTTON_A                   (1 << 0)

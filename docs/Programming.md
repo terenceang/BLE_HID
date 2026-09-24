@@ -38,7 +38,7 @@ any of the log below. Close terminals before running the script if you need the 
 only one program can hold the COM port. Expected log (with `CFG_PRINTF` on):
 
 ```
-BLE_HID v0.5.4 user_app_init! ...
+BLE_HID vX.Y.Z user_app_init! ...
 selflash: installing 28472 bytes at 4000     <- first run of a new build
 selflash: done
 ```

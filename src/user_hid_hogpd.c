@@ -74,9 +74,9 @@ const uint8_t hid_report_map[] =
     0x75, 0x01,     /*   Report Size (1)                 */
     0x95, SNES_BUTTON_COUNT, /*   Report Count           */
     0x81, 0x02,     /*   Input (Data, Var, Abs)          */
-    /* padding bits to fill the second byte - update if SNES_BUTTON_COUNT changes */
+    /* padding bits up to a whole byte */
     0x75, 0x01,     /*   Report Size (1)                 */
-    0x95, (16 - SNES_BUTTON_COUNT), /* Report Count       */
+    0x95, (HID_REPORT_LEN * 8 - SNES_BUTTON_COUNT), /* Report Count */
     0x81, 0x01,     /*   Input (Const, Arr, Abs)         */
 
     0xC0            /* End Collection                    */
@@ -96,8 +96,8 @@ const unsigned char app_dis_pnp_id[7] =
  ****************************************************************************************
  */
 
-/// Input report length: 2 bytes button bitmap (ceil(SNES_BUTTON_COUNT/8) - update if SNES_BUTTON_COUNT changes)
-#define HID_REPORT_LEN                  (2)
+// The bitmap is a uint16_t, and a zero-count padding item would be an invalid Report Map entry
+_Static_assert(SNES_BUTTON_COUNT <= 16 && SNES_BUTTON_COUNT % 8 != 0, "SNES_BUTTON_COUNT: 1..16, not a multiple of 8");
 
 
 /// Notification (CCC) configs of the HID and Battery services. Also the last values written by
@@ -147,21 +147,24 @@ static void ccc_flash_save(void)
 /// SNES controller state (updated by the application, sent as input reports)
 static uint16_t snes_buttons __SECTION_ZERO("retention_mem_area0");
 
-/// Pack a button bitmap into the 2-byte input report (little-endian, only bits [SNES_BUTTON_COUNT-1:0]
-/// valid - the 0x0F nibble mask below is SNES_BUTTON_COUNT-8 bits, update if SNES_BUTTON_COUNT changes)
+/// Pack a button bitmap into the input report (little-endian; padding bits above SNES_BUTTON_COUNT are 0)
 static void pack_report(uint8_t report[HID_REPORT_LEN], uint16_t buttons)
 {
-    report[0] = (uint8_t)(buttons & 0xFF);
-    report[1] = (uint8_t)((buttons >> 8) & 0x0F);
+    buttons &= (uint16_t)((1UL << SNES_BUTTON_COUNT) - 1);
+    for (int i = 0; i < HID_REPORT_LEN; i++)
+    {
+        report[i] = (uint8_t)(buttons >> (8 * i));
+    }
 }
 
 /// SNES pad shift-register bit n (B, Y, Select, Start, Up, Down, Left, Right, A, X, L, R) -> report bit
-static const uint16_t snes_map[SNES_BUTTON_COUNT] =
+static const uint16_t snes_map[] =
 {
     SNES_BUTTON_B, SNES_BUTTON_Y, SNES_BUTTON_SELECT, SNES_BUTTON_START,
     SNES_BUTTON_DPAD_UP, SNES_BUTTON_DPAD_DOWN, SNES_BUTTON_DPAD_LEFT, SNES_BUTTON_DPAD_RIGHT,
     SNES_BUTTON_A, SNES_BUTTON_X, SNES_BUTTON_L, SNES_BUTTON_R
 };
+_Static_assert(sizeof(snes_map) / sizeof(snes_map[0]) == SNES_BUTTON_COUNT, "snes_map[] needs SNES_BUTTON_COUNT entries");
 
 /// Read the pad: 12 us LATCH pulse, then clock out the 12 button bits (DATA is active low)
 static uint16_t snes_read(void)

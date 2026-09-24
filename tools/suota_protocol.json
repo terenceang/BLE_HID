@@ -1,0 +1,40 @@
+{
+  "_note": "Single source for tools/suota.py and tools/web. Firmware counterparts: UUIDs/commands/status sdk suotar.c + app_suotar.h, spi_gpio_map src/config/user_periph_setup.h (SPI_* pins), sig_magic src/ota_verify.c, version_tag src/user_hid_hogpd.c (app_version_tag).",
+  "service": "0000fef5-0000-1000-8000-00805f9b34fb",
+  "chars": {
+    "mem_dev": "8082caa8-41a6-4021-91c6-56f9b954cc34",
+    "gpio_map": "724249f0-5ec3-4b5f-8804-42345af08651",
+    "patch_len": "9d84b9a3-000c-49d8-9183-855b673fda31",
+    "patch_data": "457871e8-d516-4ca1-9116-57d0b17b9cb2",
+    "status": "5f78df94-798c-46f5-990a-b3eb6a065c88",
+    "pd_char_size": "42c3dfdd-77be-4d9c-8454-8f875267fb3b",
+    "version": "64b4e8b5-0de5-401b-a21d-acc8db3b913a"
+  },
+  "commands": {
+    "img_spi_flash": "0x13000000",
+    "img_end": "0xFE000000",
+    "reboot": "0xFD000000"
+  },
+  "spi_gpio_map": "0x05060300",
+  "max_block": 512,
+  "status_ok": 2,
+  "status_img_started": 16,
+  "status_text": {
+    "3": "service exit",
+    "4": "CRC error",
+    "5": "block length error",
+    "6": "flash write error",
+    "7": "block too large",
+    "8": "invalid memory type",
+    "9": "SIGNATURE CHECK FAILED - image not signed with this pad's key (rejected, old firmware kept)",
+    "17": "invalid image bank",
+    "18": "invalid image header",
+    "19": "image too large",
+    "20": "invalid product header (flash not set up for OTA)",
+    "21": "this exact image is already installed",
+    "22": "flash read error"
+  },
+  "sig_magic": "BTSNSIG1",
+  "version_tag": "BLE_HID_VERSION=",
+  "helper_port": 8765
+}

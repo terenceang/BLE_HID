@@ -22,39 +22,19 @@
 #include "user_config.h"               // APP_VERSION
 #include "selflash.h"
 
-// SUOTA image layout (same as app_suotar.h, which is only usable with BLE_SUOTA_RECEIVER)
-#define PRODUCT_HEADER_POSITION     0x38000
-#define PRODUCT_HEADER_SIGNATURE1   0x70
-#define PRODUCT_HEADER_SIGNATURE2   0x52
-#define IMAGE_HEADER_SIGNATURE1     0x70
-#define IMAGE_HEADER_SIGNATURE2     0x51
-#define CODE_OFFSET                 64
-#define STATUS_VALID_IMAGE          0xAA
-
-typedef struct { uint8_t signature[2]; uint8_t version[2]; uint32_t offset1; uint32_t offset2; } sf_product_hdr_t;
-
-typedef struct
-{
-    uint8_t  signature[2];
-    uint8_t  validflag;      // STATUS_VALID_IMAGE once the image is complete
-    uint8_t  imageid;        // higher = newer
-    uint32_t code_size;
-    uint32_t CRC;
-    uint8_t  version[16];
-    uint32_t timestamp;
-    uint8_t  encryption;
-    uint8_t  reserved[31];
-} sf_image_hdr_t;
+#include "app_suotar.h"               // SUOTA image/product header layout (SSOT: SDK)
+#include "app_bond_db.h"              // APP_BOND_DB_DATA_OFFSET
 
 #define IMG_RAM_BASE        ((const uint8_t *)0x07FC0000)
 #define IMG_RAM_END         ((uint32_t)&Image$$ER_ZI$$Base)   // bin ends where ZI starts
 #define SECTOR              (SPI_FLASH_SECTOR_SIZE)
 
-// Sectors we must never touch: SDK bond DB (0x1E000) + saved CCC (CCC_FLASH_ADDR, user_periph_setup.h), product header area
+// Sectors we must never touch: saved CCC (CCC_FLASH_ADDR) + the SDK bond DB sector right after it,
+// and the product header plus the two sectors after it (HMCLOCK keeps its pinout data there)
 #define KEEP_OUT_1_START    (CCC_FLASH_ADDR)
-#define KEEP_OUT_1_END      (0x1F000)
-#define KEEP_OUT_2_START    (0x38000)
-#define KEEP_OUT_2_END      (0x3B000)
+#define KEEP_OUT_1_END      (APP_BOND_DB_DATA_OFFSET + SECTOR)
+#define KEEP_OUT_2_START    (PRODUCT_HEADER_POSITION)
+#define KEEP_OUT_2_END      (PRODUCT_HEADER_POSITION + 3 * SECTOR)
 
 extern uint32_t Image$$ER_ZI$$Base;
 
@@ -63,7 +43,7 @@ extern uint32_t Image$$ER_ZI$$Base;
 /// garbage, so only a RAM load installs - never an image the ROM or SUOTA already put in flash.
 /// (Needed for OTA: the RAM CRC differs from the pristine image once .data has changed, so
 /// without this the first boot after an OTA update would rewrite slot 0.)
-#define SELFLASH_MAGIC      0x5E1FF1A5u
+#define SELFLASH_MAGIC      0x5E1FF1A5u       // same value in Keil_5/flash.sh
 volatile uint32_t selflash_magic __attribute__((section(".bss.retention_mem_area_uninit"), used));
 
 static uint32_t crc32_buf(uint32_t crc, const uint8_t *p, uint32_t n)
@@ -99,7 +79,7 @@ static bool overlaps(uint32_t s, uint32_t e, uint32_t ks, uint32_t ke)
     return s < ke && e > ks;
 }
 
-static bool hdr_valid(const sf_image_hdr_t *h)
+static bool hdr_valid(const image_header_t *h)
 {
     return h->signature[0] == IMAGE_HEADER_SIGNATURE1 &&
            h->signature[1] == IMAGE_HEADER_SIGNATURE2 &&
@@ -117,8 +97,8 @@ static bool id_newer(uint8_t a, uint8_t b)
 
 void selflash_run(void)
 {
-    sf_product_hdr_t ph;
-    sf_image_hdr_t   h0, h1, nh;
+    product_header_t ph;
+    image_header_t   h0, h1, nh;
     uint32_t n, off0, off1, size, crc, end;
     uint8_t id0 = 0, id1 = 0;
 

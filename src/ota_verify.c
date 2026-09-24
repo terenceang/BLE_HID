@@ -14,6 +14,7 @@
 #include "arch_wdg.h"
 #include "ota_verify.h"
 #include "ota_pubkey.h"
+#include "app_suotar.h"                // image_header_t, IMAGE_HEADER_SIGNATURE*, STATUS_VALID_IMAGE, CODE_OFFSET
 
 // micro-ecc ROM API (uECC.h v1.x). The ROM build takes keys, hashes and signatures big-endian
 // (checked on the chip against a Python-made signature: 1.4 s, ~1.3 KB of stack)
@@ -22,8 +23,6 @@ uECC_Curve uECC_secp256r1(void);
 int uECC_verify(const uint8_t *public_key, const uint8_t *message_hash, unsigned hash_size,
                 const uint8_t *signature, uECC_Curve curve);
 
-#define IMG_HDR_SIZE        64          // SUOTA image header (app_suotar.h image_header_t)
-#define IMG_VALID           0xAA        // header validflag once SUOTA verified the CRC
 static const uint8_t sig_magic[8] = { 'B', 'T', 'S', 'N', 'S', 'I', 'G', '1' };
 #define SIG_TRAILER         (sizeof(sig_magic) + 64)
 
@@ -140,13 +139,14 @@ static int ecdsa_verify(const uint8_t pub[64], const uint8_t hash[32], const uin
 
 enum ota_check ota_check_new_image(uint32_t slot_addr)
 {
-    struct { uint8_t signature[2]; uint8_t validflag; uint8_t imageid; uint32_t code_size; } hdr;
+    image_header_t hdr;
     uint8_t trailer[SIG_TRAILER], hash[32];
     uint32_t n, fw_len;
     int ok;
 
     spi_flash_read_data((uint8_t *)&hdr, slot_addr, sizeof(hdr), &n);
-    if (hdr.signature[0] != 0x70 || hdr.signature[1] != 0x51 || hdr.validflag != IMG_VALID)
+    if (hdr.signature[0] != IMAGE_HEADER_SIGNATURE1 || hdr.signature[1] != IMAGE_HEADER_SIGNATURE2 ||
+        hdr.validflag != STATUS_VALID_IMAGE)
     {
         return OTA_CHECK_NONE;          // SUOTA did not complete/validate this slot
     }
@@ -155,10 +155,10 @@ enum ota_check ota_check_new_image(uint32_t slot_addr)
     if (hdr.code_size > SIG_TRAILER && hdr.code_size < 0x20000)
     {
         fw_len = hdr.code_size - SIG_TRAILER;
-        spi_flash_read_data(trailer, slot_addr + IMG_HDR_SIZE + fw_len, SIG_TRAILER, &n);
+        spi_flash_read_data(trailer, slot_addr + CODE_OFFSET + fw_len, SIG_TRAILER, &n);
         if (!memcmp(trailer, sig_magic, sizeof(sig_magic)))
         {
-            flash_sha256(slot_addr + IMG_HDR_SIZE, fw_len, hash);
+            flash_sha256(slot_addr + CODE_OFFSET, fw_len, hash);
             ok = ecdsa_verify(ota_pubkey, hash, &trailer[sizeof(sig_magic)]);
         }
     }

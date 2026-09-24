@@ -4,7 +4,8 @@
 JLINK="${JLINK:-/c/Program Files/SEGGER/JLink_V960/JLink.exe}"
 BIN="$(cd "$(dirname "$0")" && pwd)/out_DA14585/Objects/BLE_HID_585.bin"
 MAP="$(cd "$(dirname "$0")" && pwd)/out_DA14585/Listings/BLE_HID_585.map"
-# selflash_run() only installs when it finds this magic (a ROM boot never has it)
+# selflash_run() only installs when it finds this magic (a ROM boot never has it);
+# value = SELFLASH_MAGIC in src/selflash.c
 MAGIC_ADDR=$(grep -m1 -E '^ +selflash_magic +0x' "$MAP" | awk '{print $2}')
 [ -n "$MAGIC_ADDR" ] || { echo "selflash_magic not found in $MAP"; exit 1; }
 read SP PC <<<$(python -c "
