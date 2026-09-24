@@ -1,0 +1,39 @@
+# Keil MDK build output
+Keil_5/out_*/
+Keil_5/build_log.txt
+*.axf
+*.o
+*.d
+*.crf
+*.lst
+*.map
+*.htm
+*.lnp
+*.dep
+
+# Keil / J-Link per-user state
+Keil_5/*.uvguix.*
+Keil_5/*.uvoptx
+Keil_5/JLinkLog.txt
+Keil_5/JLinkSettings.ini
+Keil_5/RTE/
+
+# Scratch
+image.png
+
+# Local-only AI tool guidance, not tracked
+CLAUDE.md
+
+# OTA tool build (tools/build_exe.bat)
+tools/.venv/
+tools/build/
+tools/dist/
+__pycache__/
+
+# OTA signing private key (tools/suota.py --keygen) - never commit, back it up
+tools/keys/
+*.pem
+
+# Web tester (tools/web)
+tools/web/node_modules/
+tools/web/dist/

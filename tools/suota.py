@@ -1,0 +1,547 @@
+"""BT-SNES over-the-air firmware update (Renesas SUOTA protocol) from a PC.
+
+    python suota.py                       window (file picker, device list, progress)
+    python suota.py FIRMWARE.bin [-d DEV] command line; DEV = address or BT-SNES name
+    python suota.py --sign FIRMWARE.bin   -> FIRMWARE_signed.bin (needs the private key)
+    python suota.py --keygen              new signing key pair (once; see below)
+    python suota.py --selftest            check the image builder and signing
+    python suota.py --serve               local helper for the web tester (tools/web)
+
+Only SIGNED images are accepted: the pad checks an ECDSA P-256 signature over the
+firmware against the public key built into it (src/config/ota_pubkey.h) before it
+marks the new image bootable. Sign the Keil output
+(Keil_5/out_DA14585/Objects/BLE_HID_585.bin) with --sign, then send the _signed.bin.
+The private key (tools/keys/ota_private.pem) is not in git - back it up: without it
+no new firmware can be sent over the air (only via J-Link).
+
+The 64-byte SUOTA image header is built here, the same way src/selflash.c builds it.
+The pad only accepts an update in OTA mode: power it on with Start + Select held.
+Needs Windows 10 1709+ (or any bleak-supported OS) and `pip install bleak`
+(signing/keygen also `pip install cryptography`).
+"""
+
+import os
+
+import argparse
+import asyncio
+import struct
+import sys
+import threading
+import time
+import zlib
+
+# Characteristic UUIDs from sdk/ble_stack/profiles/suota/suotar/src/suotar.c
+MEM_DEV      = "8082caa8-41a6-4021-91c6-56f9b954cc34"
+GPIO_MAP     = "724249f0-5ec3-4b5f-8804-42345af08651"
+PATCH_LEN    = "9d84b9a3-000c-49d8-9183-855b673fda31"
+PATCH_DATA   = "457871e8-d516-4ca1-9116-57d0b17b9cb2"
+STATUS       = "5f78df94-798c-46f5-990a-b3eb6a065c88"
+PD_CHAR_SIZE = "42c3dfdd-77be-4d9c-8454-8f875267fb3b"
+
+IMG_SPI_FLASH = 0x13000000      # SUOTAR_IMG_SPI_FLASH, bank 0 = let the pad pick the older slot
+IMG_END       = 0xFE000000
+REBOOT        = 0xFD000000
+# SPI flash pins (port << 4 | pin): MISO P0_5, MOSI P0_6, CS P0_3, CLK P0_0 (user_periph_setup.h)
+SPI_GPIO_MAP  = 0x05 << 24 | 0x06 << 16 | 0x03 << 8 | 0x00
+MAX_BLOCK     = 0x200           # SUOTA_OVERALL_PD_SIZE
+
+ST_IMG_STARTED, ST_CMP_OK = 0x10, 0x02
+STATUS_TEXT = {
+    0x03: "service exit", 0x04: "CRC error", 0x05: "block length error",
+    0x06: "flash write error", 0x07: "block too large", 0x08: "invalid memory type",
+    0x09: "SIGNATURE CHECK FAILED - image not signed with this pad's key (rejected, old firmware kept)",
+    0x11: "invalid image bank", 0x12: "invalid image header",
+    0x13: "image too large", 0x14: "invalid product header (flash not set up for OTA)",
+    0x15: "this exact image is already installed", 0x16: "flash read error",
+}
+VERSION_TAG = b"BLE_HID_VERSION="
+
+# Signed firmware = firmware + SIG_MAGIC + 64-byte signature (r || s, big-endian) of SHA-256(firmware).
+# Must match src/ota_verify.c.
+SIG_MAGIC = b"BTSNSIG1"
+SIG_TRAILER = len(SIG_MAGIC) + 64
+HERE = os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, "frozen", False) else __file__))
+KEY_FILE = os.path.join(HERE, "keys", "ota_private.pem")
+PUBKEY_HEADER = os.path.join(HERE, "..", "src", "config", "ota_pubkey.h")
+
+
+def is_signed(body: bytes) -> bool:
+    return len(body) > SIG_TRAILER and body[-SIG_TRAILER:-64] == SIG_MAGIC
+
+
+def sign(fw: bytes, key_file: str = KEY_FILE) -> bytes:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+    if is_signed(fw):
+        raise ValueError("already signed")
+    key = serialization.load_pem_private_key(open(key_file, "rb").read(), None)
+    r, s = decode_dss_signature(key.sign(fw, ec.ECDSA(hashes.SHA256())))
+    return fw + SIG_MAGIC + r.to_bytes(32, "big") + s.to_bytes(32, "big")
+
+
+def keygen():
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    if os.path.exists(KEY_FILE):
+        sys.exit(f"{KEY_FILE} exists - refusing to overwrite (pads built with its public key "
+                 "would reject everything signed with a new one)")
+    key = ec.generate_private_key(ec.SECP256R1())
+    os.makedirs(os.path.dirname(KEY_FILE), exist_ok=True)
+    with open(KEY_FILE, "wb") as f:
+        f.write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                  serialization.NoEncryption()))
+    n = key.public_key().public_numbers()
+    xy = n.x.to_bytes(32, "big") + n.y.to_bytes(32, "big")
+    rows = ",\n    ".join(", ".join(f"0x{b:02X}" for b in xy[i:i + 16]) for i in range(0, 64, 16))
+    with open(PUBKEY_HEADER, "w") as f:
+        f.write("/// OTA signing public key: secp256r1, X || Y big-endian (micro-ecc format).\n"
+                "/// Generated by tools/suota.py --keygen; the private key is tools/keys/ota_private.pem\n"
+                "/// (not in git). Firmware built with this key only accepts images signed by it.\n"
+                "/// Included only by src/ota_verify.c.\n"
+                "static const uint8_t ota_pubkey[64] =\n{\n    " + rows + "\n};\n")
+    print(f"wrote {KEY_FILE} (PRIVATE - back it up, keep it out of git)\nwrote {PUBKEY_HEADER}")
+
+
+def build_payload(body: bytes, timestamp: int = None) -> bytes:
+    """SUOTA image = 64-byte header + body, plus the XOR byte the pad checks (crc_calc == 0)."""
+    i = body.find(VERSION_TAG)
+    version = body[i + len(VERSION_TAG):body.index(b"\0", i)] if i >= 0 else b"unknown"
+    header = struct.pack("<2sBBII16sIB31s", b"\x70\x51", 0xFF, 0, len(body),
+                         zlib.crc32(body), version[:15], int(time.time() if timestamp is None else timestamp),
+                         0, bytes(31))
+    image = header + body
+    x = 0
+    for b in image:
+        x ^= b
+    return image + bytes([x])
+
+
+def version_of(body: bytes) -> str:
+    return build_payload(body, 0)[12:28].rstrip(b"\0").decode(errors="replace")   # header.version
+
+
+async def find_pads(log):
+    """BT-SNES pads: advertising ones, plus pads paired with Windows (a connected pad doesn't advertise)."""
+    from bleak import BleakScanner
+    pads = {}
+    for dev, adv in (await BleakScanner.discover(5.0, return_adv=True)).values():
+        name = adv.local_name or dev.name or ""
+        if name.startswith("BT-SNES"):
+            pads[dev.address.upper()] = name
+    try:
+        from winrt.windows.devices.bluetooth import BluetoothLEDevice
+        from winrt.windows.devices.enumeration import DeviceInformation
+        sel = BluetoothLEDevice.get_device_selector_from_pairing_state(True)
+        for info in await DeviceInformation.find_all_async_aqs_filter(sel):
+            if info.name.startswith("BT-SNES"):
+                pads.setdefault(info.id.split("-")[-1].upper(), info.name + " (paired)")
+    except Exception as e:          # not Windows, or winrt missing: scanning alone still works
+        log(f"(paired-device list unavailable: {e})")
+    return pads
+
+
+async def update(address: str, payload: bytes, log, progress):
+    from bleak import BleakClient
+    status = asyncio.Queue()
+
+    async def expect(ok, what, timeout=15):
+        try:
+            s = await asyncio.wait_for(status.get(), timeout)
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"{what}: no answer from the pad")
+        if s != ok:
+            raise RuntimeError(f"{what}: {STATUS_TEXT.get(s, hex(s))}")
+
+    def u32(v):
+        return struct.pack("<I", v)
+
+    log(f"connecting to {address} ...")
+    target = address
+    if sys.platform == "win32":
+        # A BLEDevice makes bleak open the pad through Windows' paired-device lookup instead of
+        # scanning for it first - a pad already connected to Windows doesn't advertise
+        from bleak.backends.device import BLEDevice
+        target = BLEDevice(address, None, None)
+    async with BleakClient(target, timeout=20, winrt={"use_cached_services": False}) as c:
+        if c.services.get_service("0000fef5-0000-1000-8000-00805f9b34fb") is None:
+            raise RuntimeError("no OTA service - flash v0.4.0+ over J-Link first, "
+                               "then remove and re-pair the pad in Windows")
+        try:
+            await c.pair()          # OTA needs an encrypted link; no-op if already bonded
+        except Exception as e:
+            log(f"(pairing: {e})")
+        try:
+            await c.start_notify(STATUS, lambda _, d: status.put_nowait(d[0]))
+            await c.write_gatt_char(MEM_DEV, u32(IMG_SPI_FLASH), response=True)
+        except Exception as e:
+            raise RuntimeError(f"pad refused the update ({e}).\nIs it in OTA mode? Power it on "
+                               "holding Start + Select, and make sure it is paired with this PC.")
+        await expect(ST_IMG_STARTED, "start")
+        await c.write_gatt_char(GPIO_MAP, u32(SPI_GPIO_MAP), response=True)
+
+        chunk = min(int.from_bytes(await c.read_gatt_char(PD_CHAR_SIZE), "little") or 20,
+                    c.mtu_size - 3)
+        block = MAX_BLOCK // chunk * chunk
+        log(f"sending {len(payload)} bytes ({chunk}-byte packets, {block}-byte blocks)")
+        cur_len = None
+        for off in range(0, len(payload), block):
+            blk = payload[off:off + block]
+            if len(blk) != cur_len:
+                cur_len = len(blk)
+                await c.write_gatt_char(PATCH_LEN, struct.pack("<H", cur_len), response=True)
+            for i in range(0, len(blk), chunk):
+                await c.write_gatt_char(PATCH_DATA, blk[i:i + chunk], response=False)
+            await expect(ST_CMP_OK, f"block at {off}")
+            progress((off + len(blk)) / len(payload))
+
+        await c.write_gatt_char(MEM_DEV, u32(IMG_END), response=True)
+        await expect(ST_CMP_OK, "CRC check")
+        log("checking signature on the pad ...")
+        await expect(ST_CMP_OK, "signature check", timeout=60)
+        log("signature OK - rebooting the pad into the new firmware")
+        try:
+            await c.write_gatt_char(MEM_DEV, u32(REBOOT), response=True)
+        except Exception:
+            pass                    # the pad disconnects to reboot; that's the success path
+
+
+def gui():
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+
+    root = tk.Tk()
+    root.title("BT-SNES firmware update")
+    root.resizable(False, False)
+    fw, dev = tk.StringVar(), tk.StringVar()
+    pads = {}
+
+    def log(msg):
+        root.after(0, lambda: (out.insert("end", msg + "\n"), out.see("end")))
+
+    def run(coro, done=None):
+        def worker():
+            try:
+                r = asyncio.run(coro)
+                if done:
+                    root.after(0, lambda: done(r))
+            except Exception as e:
+                log(f"ERROR: {e}")
+                root.after(0, lambda: messagebox.showerror("Update failed", str(e)))
+            finally:
+                root.after(0, lambda: busy(False))
+        busy(True)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def busy(b):
+        for w in (bscan, bgo, bfile):
+            w.config(state="disabled" if b else "normal")
+
+    def pick():
+        p = filedialog.askopenfilename(filetypes=[("Firmware", "*.bin"), ("All files", "*.*")])
+        if p:
+            fw.set(p)
+            b = open(p, 'rb').read()
+            log(f"{p}: version {version_of(b)}, {'signed' if is_signed(b) else 'NOT SIGNED'}")
+
+    def scan():
+        log("scanning 5 s ...")
+
+        def done(found):
+            pads.clear()
+            pads.update({f"{n}  [{a}]": a for a, n in found.items()})
+            box["values"] = list(pads)
+            if pads:
+                box.current(0)
+            log(f"found {len(pads)} pad(s)")
+        run(find_pads(log), done)
+
+    def go():
+        if not fw.get() or not dev.get():
+            messagebox.showwarning("BT-SNES update", "Pick a firmware file and a pad first.")
+            return
+        body = open(fw.get(), "rb").read()
+        if not is_signed(body):
+            messagebox.showerror("BT-SNES update", "This file is not signed.\n\n"
+                                 "Sign it first:  python suota.py --sign FILE.bin\n"
+                                 "and pick the _signed.bin it writes.")
+            return
+        payload = build_payload(body)
+        bar["value"] = 0
+        run(update(pads.get(dev.get(), dev.get()), payload, log,
+                   lambda f: root.after(0, lambda: bar.configure(value=f * 100))),
+            lambda _: messagebox.showinfo("BT-SNES update", "Done. The pad is rebooting."))
+
+    frm = ttk.Frame(root, padding=10)
+    frm.grid()
+    ttk.Label(frm, text="1. Power the pad on holding Start + Select (OTA mode).").grid(row=0, column=0, columnspan=3, sticky="w")
+    ttk.Label(frm, text="Firmware").grid(row=1, column=0, sticky="w")
+    ttk.Entry(frm, textvariable=fw, width=48).grid(row=1, column=1)
+    bfile = ttk.Button(frm, text="Browse...", command=pick)
+    bfile.grid(row=1, column=2)
+    ttk.Label(frm, text="Pad").grid(row=2, column=0, sticky="w")
+    box = ttk.Combobox(frm, textvariable=dev, width=45)
+    box.grid(row=2, column=1)
+    bscan = ttk.Button(frm, text="Scan", command=scan)
+    bscan.grid(row=2, column=2)
+    bgo = ttk.Button(frm, text="Update", command=go)
+    bgo.grid(row=3, column=2, pady=6)
+    bar = ttk.Progressbar(frm, length=380, maximum=100)
+    bar.grid(row=3, column=0, columnspan=2, sticky="w")
+    out = tk.Text(frm, width=70, height=12)
+    out.grid(row=4, column=0, columnspan=3)
+    root.after(100, scan)
+    root.mainloop()
+
+
+def cli(args):
+    body = open(args.firmware, "rb").read()
+    print(f"{args.firmware}: version {version_of(body)}, {len(body)} bytes")
+    if not is_signed(body):
+        sys.exit("not signed - run: python suota.py --sign FILE.bin, then send the _signed.bin")
+    address = args.device
+    if not address or address.upper().startswith("BT-SNES"):
+        found = asyncio.run(find_pads(print))
+        match = [a for a, n in found.items() if not address or n.upper().startswith(address.upper())]
+        if len(match) != 1:
+            sys.exit(f"found {len(found)} pad(s): {found}\nuse -d ADDRESS to choose one")
+        address = match[0]
+    last = [-1]
+
+    def progress(f):
+        if int(f * 20) != last[0]:
+            last[0] = int(f * 20)
+            print(f"  {f * 100:5.1f} %")
+    try:
+        asyncio.run(update(address, build_payload(body), print, progress))
+    except RuntimeError as e:
+        sys.exit(f"ERROR: {e}")
+    print("done")
+
+
+# ---- helper for the web tester (tools/web): python suota.py --serve ------------------------------
+
+SERVE_PORT = 8765
+# Paired BT-SNES pads as Windows sees them: connection state, battery (read by Windows from the
+# Battery Service) and firmware version (the REV in the HID hardware ID = Device Information PnP ID).
+PADS_PS = r"""
+$out = @()
+foreach ($d in Get-PnpDevice -PresentOnly -Class Bluetooth | Where-Object { $_.InstanceId -like 'BTHLE\DEV_*' -and $_.FriendlyName -like 'BT-SNES*' }) {
+  $addr = (($d.InstanceId -split '\\')[1]) -replace '^DEV_', ''
+  $conn = (Get-PnpDeviceProperty -InstanceId $d.InstanceId -KeyName '{83DA6326-97A6-4088-9453-A1923F573B29} 15' -ErrorAction SilentlyContinue).Data
+  $batt = (Get-PnpDeviceProperty -InstanceId $d.InstanceId -KeyName '{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2' -ErrorAction SilentlyContinue).Data
+  $rev = $null
+  # not -PresentOnly: while the pad sleeps its HID node is absent, but Windows keeps its hardware ID
+  $hid = Get-PnpDevice -Class HIDClass | Where-Object { $_.InstanceId -like "HID\*_$addr\*" } | Select-Object -First 1
+  if ($hid -and ($hid.InstanceId -match 'REV&([0-9A-F]{4})')) { $rev = $Matches[1] }
+  $out += [pscustomobject]@{ name = $d.FriendlyName; address = $addr; connected = [bool]$conn; battery = $batt; rev = $rev }
+}
+ConvertTo-Json -InputObject @($out) -Compress
+"""
+
+
+def windows_pads():
+    """[{name, address "AA:BB:..", connected, battery, version}] from Windows' device properties."""
+    import json
+    import subprocess
+    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", PADS_PS],
+                       capture_output=True, text=True, timeout=30,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    pads = json.loads(r.stdout or "[]") or []
+    for p in pads:
+        a = p["address"].upper()
+        p["address"] = ":".join(a[i:i + 2] for i in range(0, 12, 2))
+        rev = p.pop("rev")      # USB bcdDevice form 0xJJMN (APP_VERSION_BCD)
+        p["version"] = f"{int(rev[:2], 16)}.{int(rev[2], 16)}.{int(rev[3], 16)}" if rev else None
+    return pads
+
+
+def serve(port=SERVE_PORT):
+    """Local HTTP API for tools/web: pad list/version/battery from Windows, OTA through bleak.
+    Bound to 127.0.0.1; only pages served from localhost may call it (CORS + Origin check)."""
+    import json
+    import re
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    ota = {"busy": False, "progress": 0.0, "log": [], "error": None, "done": False}
+    cache = {"t": 0.0, "pads": []}
+    lock = threading.Lock()
+    local = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
+
+    # Windows' REV is fixed at pairing and goes stale after a firmware update, so read the live
+    # Firmware Revision (Device Information 0x2A26) once per connection, over the Windows link
+    live = {}           # address -> version read from the pad while it's connected
+    reading = set()
+
+    def read_live_version(address):
+        async def rd():
+            from bleak import BleakClient
+            from bleak.backends.device import BLEDevice
+            async with BleakClient(BLEDevice(address, None, None) if sys.platform == "win32" else address,
+                                   timeout=20) as c:
+                return (await c.read_gatt_char("00002a26-0000-1000-8000-00805f9b34fb")).decode()
+        try:
+            live[address] = asyncio.run(rd())
+        except Exception:
+            pass        # busy/asleep: keep showing Windows' value, retry on a later poll
+        finally:
+            reading.discard(address)
+
+    def pads():
+        with lock:
+            if time.time() - cache["t"] > 3:
+                cache["pads"], cache["t"] = windows_pads(), time.time()
+                for p in cache["pads"]:
+                    a = p["address"]
+                    if not p["connected"]:
+                        live.pop(a, None)                   # re-read after the next connection
+                    elif a not in live and a not in reading and not ota["busy"]:
+                        reading.add(a)
+                        threading.Thread(target=read_live_version, args=(a,), daemon=True).start()
+            out = []
+            for p in cache["pads"]:
+                q = dict(p)
+                q["version_live"] = q["address"] in live    # False: Windows' cached value (from pairing)
+                q["version"] = live.get(q["address"], q["version"])
+                out.append(q)
+            return out
+
+    def run_ota(address, body):
+        def log(m):
+            ota["log"].append(m)
+        try:
+            asyncio.run(update(address, build_payload(body), log, lambda f: ota.update(progress=f)))
+            ota["done"] = True
+        except Exception as e:
+            ota["error"] = str(e)
+        finally:
+            ota["busy"] = False
+
+    class Handler(BaseHTTPRequestHandler):
+        def origin_ok(self):
+            o = self.headers.get("Origin")
+            return o is None or bool(local.match(o))
+
+        def reply(self, code, obj=None):
+            body = json.dumps(obj).encode() if obj is not None else b""
+            self.send_response(code)
+            if self.headers.get("Origin") and self.origin_ok():
+                self.send_header("Access-Control-Allow-Origin", self.headers["Origin"])
+                self.send_header("Access-Control-Allow-Methods", "GET, POST")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_OPTIONS(self):
+            self.reply(204 if self.origin_ok() else 403)
+
+        def do_GET(self):
+            if not self.origin_ok():
+                return self.reply(403, {"error": "origin not allowed"})
+            path = urlparse(self.path).path
+            if path == "/api/pads":
+                try:
+                    return self.reply(200, pads())
+                except Exception as e:
+                    return self.reply(500, {"error": str(e)})
+            if path == "/api/update":
+                return self.reply(200, ota)
+            self.reply(404, {"error": "not found"})
+
+        def do_POST(self):
+            # an Origin header is required: a browser always sends one, so another website can't
+            # start an update without it being checked (and the pad rejects unsigned images anyway)
+            if not self.headers.get("Origin") or not self.origin_ok():
+                return self.reply(403, {"error": "origin not allowed"})
+            url = urlparse(self.path)
+            if url.path != "/api/update":
+                return self.reply(404, {"error": "not found"})
+            address = parse_qs(url.query).get("address", [""])[0]
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if not address:
+                return self.reply(400, {"error": "address missing"})
+            if not is_signed(body):
+                return self.reply(400, {"error": "file is not signed - run: python tools/suota.py --sign FILE.bin"})
+            if ota["busy"]:
+                return self.reply(409, {"error": "an update is already running"})
+            ota.update(busy=True, progress=0.0, log=[], error=None, done=False)
+            threading.Thread(target=run_ota, args=(address, body), daemon=True).start()
+            self.reply(202, ota)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    msg = f"BT-SNES helper on http://127.0.0.1:{port} - keep it running while you use tools/web"
+    if getattr(sys, "frozen", False):           # suota.exe has no console: show a small window
+        import tkinter as tk
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        root = tk.Tk()
+        root.title("BT-SNES helper")
+        tk.Label(root, text=msg + "\nClose this window to stop it.", padx=20, pady=16).pack()
+        root.mainloop()
+    else:
+        print(msg + " (Ctrl+C to stop)")
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            pass
+
+
+def selftest():
+    body = b"\x00" * 100 + VERSION_TAG + b"1.2.3\0" + b"\x5a" * 50
+    p = build_payload(body, 1234)
+    assert len(p) == 64 + len(body) + 1
+    sig, valid, imgid, size, crc, ver, ts, enc = struct.unpack("<2sBBII16sIB", p[:33])
+    assert (sig, size, crc, ts, enc) == (b"\x70\x51", len(body), zlib.crc32(body), 1234, 0)
+    assert ver.rstrip(b"\0") == b"1.2.3" and version_of(body) == "1.2.3"
+    x = 0
+    for b in p:
+        x ^= b
+    assert x == 0, "XOR over the whole payload must be 0 (SUOTA crc_calc)"
+    try:
+        import tempfile
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+    except ImportError:
+        print("selftest ok (signing not checked: no cryptography package)")
+        return
+    key = ec.generate_private_key(ec.SECP256R1())
+    kf = os.path.join(tempfile.mkdtemp(), "k.pem")
+    open(kf, "wb").write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                           serialization.NoEncryption()))
+    signed = sign(body, kf)
+    assert is_signed(signed) and not is_signed(body) and signed[:len(body)] == body
+    r, s = int.from_bytes(signed[-64:-32], "big"), int.from_bytes(signed[-32:], "big")
+    key.public_key().verify(encode_dss_signature(r, s), body, ec.ECDSA(hashes.SHA256()))
+    print("selftest ok")
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("firmware", nargs="?", help="BLE_HID_585.bin (omit for the window)")
+    ap.add_argument("-d", "--device", help="pad address, or BT-SNES name prefix")
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--keygen", action="store_true", help="create the signing key pair (once)")
+    ap.add_argument("--sign", metavar="FIRMWARE.bin", help="write FIRMWARE_signed.bin")
+    ap.add_argument("--serve", action="store_true", help=f"helper for tools/web on 127.0.0.1:{SERVE_PORT}")
+    a = ap.parse_args()
+    if a.selftest:
+        selftest()
+    elif a.serve:
+        serve()
+    elif a.keygen:
+        keygen()
+    elif a.sign:
+        out = os.path.splitext(a.sign)[0] + "_signed.bin"
+        signed = sign(open(a.sign, "rb").read())      # sign first: no empty output file on failure
+        open(out, "wb").write(signed)
+        print(f"wrote {out}")
+    elif a.firmware:
+        cli(a)
+    else:
+        gui()

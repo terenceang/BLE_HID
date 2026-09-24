@@ -1,0 +1,106 @@
+:root {
+  --bg: #f3f3f6; --panel: #ffffff; --text: #1b1b21; --muted: #62626d; --line: #dcdce3;
+  --shell: #d6d6dd; --key: #6f6f7a; --key-text: #ffffff; --on: #d93a30; --on-ring: #ffb4ad;
+  --good: #1e8449; --warn: #b26a00; --bad: #c0392b; --accent: #5b3fd1; --accent-text: #ffffff;
+  --idle: #9a9aa6; --focus: #5b3fd1;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131318; --panel: #1d1d24; --text: #ececf2; --muted: #a0a0ac; --line: #30303a;
+    --shell: #34343e; --key: #5a5a66; --key-text: #ffffff; --on: #ff5347; --on-ring: #ffb4ad;
+    --good: #43c47a; --warn: #f0a33a; --bad: #ff6b60; --accent: #8f78ff; --accent-text: #ffffff;
+    --idle: #6c6c78; --focus: #b3a4ff;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, "Segoe UI", sans-serif; }
+main { max-width: 780px; margin: 0 auto; padding: 16px; }
+header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0 16px; }
+h1 { font-size: 1.6rem; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 1.05rem; margin: 0 0 12px; }
+section, details { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; margin-bottom: 16px; }
+.muted { color: var(--muted); }
+.small { font-size: 0.85rem; margin: 8px 0 0; }
+.mono, code, pre { font-family: ui-monospace, Consolas, monospace; font-size: 0.85rem; }
+code { overflow-wrap: anywhere; }
+pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; white-space: pre-wrap; margin: 12px 0 0; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+
+/* status chips */
+.status { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); font-size: 0.85rem; }
+.chip-label { color: var(--muted); }
+.chip-value { font-weight: 600; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); }
+.chip.good .dot { background: var(--good); }
+.chip.warn .dot { background: var(--warn); }
+
+/* buttons */
+button { font: inherit; font-weight: 600; padding: 8px 16px; border-radius: 9px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+button.danger { background: transparent; border-color: var(--bad); color: var(--bad); }
+button:disabled, button:disabled.primary, button:disabled.danger { background: var(--bg); border-color: var(--line); color: var(--idle); cursor: not-allowed; }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; }
+
+/* file picker: native input kept for keyboard/screen readers, visually replaced */
+.filepick { position: relative; display: inline-block; }
+.filepick input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.filepick span { display: inline-block; padding: 8px 16px; border: 1px dashed var(--muted); border-radius: 9px; font-weight: 600; }
+.filepick:focus-within span { outline: 3px solid var(--focus); outline-offset: 2px; }
+.file { font-size: 0.9rem; overflow-wrap: anywhere; }
+.ok { color: var(--good); font-weight: 600; }
+.bad { color: var(--bad); font-weight: 600; }
+progress { display: block; width: 100%; height: 10px; margin-top: 12px; accent-color: var(--accent); }
+
+/* notes */
+.note { margin: 12px 0 0; padding: 10px 12px; border-radius: 9px; border-left: 4px solid var(--idle); background: var(--bg); font-size: 0.92rem; }
+.note.error { border-color: var(--bad); }
+.note.success { border-color: var(--good); }
+.note.warn { border-color: var(--warn); }
+
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 0 0 14px; }
+dt { color: var(--muted); }
+dd { margin: 0; overflow-wrap: anywhere; }
+
+/* advanced (firmware) */
+details summary { display: flex; align-items: baseline; gap: 10px; cursor: pointer; list-style: none; }
+details summary::-webkit-details-marker { display: none; }
+details summary::before { content: "▸"; color: var(--muted); transition: transform 120ms; }
+details[open] summary::before { transform: rotate(90deg); }
+details summary h2 { margin: 0; }
+details[open] summary { margin-bottom: 8px; }
+
+/* SNES pad (SnesPad.jsx): keeps its own product colours in both themes */
+.snes { position: relative; max-width: 600px; margin: 0 auto; }
+.pad { display: block; width: 100%; height: auto; transition: opacity 150ms; }
+.pad.waiting { opacity: 0.35; }
+.overlay { position: absolute; inset: 0; display: grid; place-items: center; font-weight: 700; font-size: 1.1rem; pointer-events: none; }
+.pad text { font-family: "Segoe UI", system-ui, sans-serif; font-weight: 700; text-anchor: middle; }
+.pad .brand { font-size: 46px; fill: #4b4b57; text-anchor: start; letter-spacing: 2px; }
+.pad .print { font-size: 30px; fill: #3b3b40; letter-spacing: 1px; }
+.pad .plate { font-size: 44px; fill: #ececec; }
+/* only the key groups: fill-box origin would also shift the pills' rotate() attribute */
+.pad .dp, .pad .sh, .pad .pill, .pad .fb { transform-box: fill-box; transform-origin: center; transition: transform 60ms, filter 60ms; }
+.pad .cross { fill: #4a4a4e; }
+.pad .dp rect { fill: transparent; }
+.pad .dp .arrow { fill: #8b8b91; }
+.pad .dp.on rect { fill: #1f1f22; stroke: #ff7a1a; stroke-width: 6; }
+.pad .dp.on .arrow { fill: #ffb347; }
+.pad .sh rect { fill: #a9a39a; stroke: #8f887d; stroke-width: 3; }
+.pad .sh text { font-size: 34px; fill: #4b4b52; }
+.pad .sh.on { transform: translateY(10px); }
+.pad .sh.on rect { fill: #6f695f; stroke: #ff7a1a; stroke-width: 6; }
+.pad .sh.on text { fill: #fff; }
+.pad .pill rect { fill: #6d665c; filter: drop-shadow(0 4px 3px rgba(0,0,0,.35)); }
+.pad .pill.on { transform: scale(0.92); }
+.pad .pill.on rect { fill: #2f2b26; filter: none; stroke: #ff7a1a; stroke-width: 6; }
+.pad .fb { filter: drop-shadow(0 6px 4px rgba(0,0,0,.4)); }
+.pad .fb .shine { fill: rgba(255,255,255,.35); }
+.pad .fb.on { filter: brightness(0.7); transform: scale(0.9); }
+.pad .fb.on circle { stroke: #fff; stroke-width: 8; }
+.pad .fb.on .shine { opacity: 0; }
+.held { text-align: center; margin: 10px 0 0; min-height: 1.5em; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

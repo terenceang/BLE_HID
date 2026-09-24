@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 220" font-family="sans-serif">
+  <!-- SNES controller plug, face-on, pins toward viewer: flat left edge, rounded right edge -->
+  <path d="M 30 30
+           L 340 30
+           A 55 55 0 0 1 340 140
+           L 30 140
+           Z"
+        fill="#2b2b2b" stroke="#000" stroke-width="2"/>
+
+  <!-- recessed pin housing -->
+  <rect x="55" y="55" width="290" height="60" rx="10" fill="#1a1a1a" stroke="#000"/>
+
+  <!-- pin group 1: pins 1-4 -->
+  <g fill="#c8c8c8" stroke="#555">
+    <circle cx="90"  cy="85" r="9"/>
+    <circle cx="125" cy="85" r="9"/>
+    <circle cx="160" cy="85" r="9"/>
+    <circle cx="195" cy="85" r="9"/>
+  </g>
+  <!-- pin group 2: pins 5-7 -->
+  <g fill="#c8c8c8" stroke="#555">
+    <circle cx="250" cy="85" r="9"/>
+    <circle cx="285" cy="85" r="9"/>
+    <circle cx="320" cy="85" r="9"/>
+  </g>
+
+  <!-- pin numbers -->
+  <g font-size="13" text-anchor="middle" fill="#fff">
+    <text x="90"  y="68">1</text>
+    <text x="125" y="68">2</text>
+    <text x="160" y="68">3</text>
+    <text x="195" y="68">4</text>
+    <text x="250" y="68">5</text>
+    <text x="285" y="68">6</text>
+    <text x="320" y="68">7</text>
+  </g>
+
+  <!-- signal labels -->
+  <g font-size="12" text-anchor="middle" fill="#000">
+    <text x="90"  y="130">+5V</text>
+    <text x="125" y="130">CLK</text>
+    <text x="160" y="130">Latch</text>
+    <text x="195" y="130">D0</text>
+    <text x="250" y="130">D1</text>
+    <text x="285" y="130">SEL</text>
+    <text x="320" y="130">GND</text>
+  </g>
+
+  <text x="210" y="200" font-size="13" text-anchor="middle" fill="#000">
+    SNES controller plug, viewed face-on (pins toward you)
+  </text>
+</svg>
